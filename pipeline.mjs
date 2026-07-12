@@ -59,7 +59,7 @@ function getRows(node) {
 }
 
 async function generateDecision(db, ticker) {
-  console.log(`[eod] ${ticker}: building Decision Dashboard via Mozy AI`);
+  console.log(`[eod] ${ticker}: building rule-based technical signal`);
   const quoteRows = getRows(getLatest(db, ticker, 'quote'));
   const ohlcvRows = getRows(getLatest(db, ticker, 'ohlcv'));
   const newsRows = getRows(getLatest(db, ticker, 'news'));
