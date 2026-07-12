@@ -1,7 +1,7 @@
 {
-  "name": "mozy-stock-dashboard",
-  "version": "1.0.0",
-  "description": "Live local dashboard for VN stock watchlist using Mozyfin data + Mozy AI for EOD decisions",
+  "name": "vn-stock-dashboard",
+  "version": "1.1.0",
+  "description": "Local Vietnam stock watchlist dashboard using public Yahoo Finance data and rule-based technical signals",
   "type": "module",
   "main": "server.mjs",
   "scripts": {
@@ -15,6 +15,6 @@
     "better-sqlite3": "^11.0.0",
     "express": "^4.21.0"
   },
-  "keywords": ["stock", "dashboard", "vietnam", "mozyfin", "trading"],
+  "keywords": ["stock", "dashboard", "vietnam", "yahoo-finance", "technical-analysis"],
   "license": "MIT"
 }
