@@ -12,7 +12,7 @@
     "pipeline:all": "node pipeline.mjs all"
   },
   "dependencies": {
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^12.11.1",
     "express": "^4.21.0"
   },
   "keywords": ["stock", "dashboard", "vietnam", "yahoo-finance", "technical-analysis"],
