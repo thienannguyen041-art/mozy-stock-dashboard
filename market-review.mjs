@@ -1,73 +1,52 @@
-// Watchlist Review — focus on configured tickers only (DGC, MSN, SCS)
+// Rule-based watchlist review with public Yahoo Finance data.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { askMozy } from './mozy-ask.mjs';
 import { safeFetch } from './mozyfin.mjs';
+import { buildDataPerspective } from './technicals.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
 
-export async function generateMarketReview() {
-  // Pull data for each watchlist ticker
-  const watchlist = config.tickers;
-  const tickerData = {};
-
-  for (const t of watchlist) {
-    const sym = `${t}.VN`;
-    try {
-      const [q, ohlcv, news] = await Promise.all([
-        safeFetch(['quote', sym], { timeoutMs: 15000 }),
-        safeFetch(['ohlcv', sym, '--timeframe', '1d', '--limit', '10'], { timeoutMs: 15000 }),
-        safeFetch(['news', '--query', sym, '--limit', '5'], { timeoutMs: 15000 }),
-      ]);
-      tickerData[t] = {
-        quote: q?.rows?.[q.rows.length - 1] || q?.data?.rows?.[0] || {},
-        ohlcv: ohlcv?.rows || ohlcv?.data?.rows || [],
-        news: news?.rows || news?.data?.rows || [],
-      };
-    } catch (_) {
-      tickerData[t] = { error: 'fetch failed' };
-    }
-  }
-
-  const prompt = `Bạn là trợ lý phân tích. NHIỆM VỤ: Phân tích ${watchlist.length} cổ phiếu trong watchlist dựa trên dữ liệu thực bên dưới.
-
-⚠️ QUAN TRỌNG: Đây là "Phân tích Watchlist", KHÔNG phải "Market Review". KHÔNG viết về VN-Index, HNX-Index, UPCOM. KHÔNG dùng schema có "indices", "breadth", "sectors", "foreign_flow", "highlights".
-
-# Dữ liệu thực:
-${JSON.stringify(tickerData, null, 2)}
-
-# Output JSON (CHÍNH XÁC schema này, không thêm bớt key ngoài danh sách):
-{
-  "headline": "tóm tắt watchlist",
-  "watchlist": [{
-    "ticker": "MÃ",
-    "price": "giá",
-    "change": "+/-x%",
-    "sentiment": "tích cực|tiêu cực|trung lập",
-    "key_signals": ["tín hiệu"],
-    "news_headlines": ["tin"],
-    "recommendation": "khuyến nghị"
-  }],
-  "overall_sentiment": "tổng quan",
-  "risk_alerts": ["rủi ro"],
-  "outlook": "nhận định"
+function reviewFromScore(score) {
+  if (score >= 65) return ['tích cực', 'Theo dõi điểm mua gần hỗ trợ.'];
+  if (score >= 55) return ['trung lập', 'Có thể tích lũy từng phần khi thanh khoản xác nhận.'];
+  if (score < 40) return ['tiêu cực', 'Hạn chế mở vị thế mới, ưu tiên quản trị rủi ro.'];
+  return ['trung lập', 'Quan sát thêm xác nhận xu hướng.'];
 }
 
-KHÔNG markdown. KHÔNG thêm text ngoài JSON. Chỉ JSON, không gì khác. Tiếng Việt.`;
-
-  let out;
-  try {
-    out = await askMozy(prompt, { mode: 'simple_chat', timeoutSec: 420 });
-  } catch (err) {
-    const msg = String(err?.message || err);
-    if (!/timed out|status=thinking/i.test(msg)) throw err;
-    out = await askMozy(prompt, { mode: 'auto', timeoutSec: 900 });
+export async function generateMarketReview() {
+  const items = [];
+  for (const ticker of config.tickers || []) {
+    const [quote, ohlcv] = await Promise.all([
+      safeFetch(['quote', `${ticker}.VN`]),
+      safeFetch(['ohlcv', `${ticker}.VN`, '--limit', '90'])
+    ]);
+    if (quote.error || ohlcv.error) {
+      items.push({ ticker, price: '—', change: '—', sentiment: 'trung lập', key_signals: ['Không lấy được dữ liệu.'], news_headlines: [], recommendation: 'Kiểm tra lại mã hoặc kết nối.' });
+      continue;
+    }
+    const q = quote.rows?.[0] || {};
+    const dp = buildDataPerspective(ohlcv.rows || []) || {};
+    const score = dp.trend_status?.trend_score ?? 50;
+    const [sentiment, recommendation] = reviewFromScore(score);
+    items.push({
+      ticker,
+      price: q.close == null ? '—' : Number(q.close).toLocaleString('vi-VN'),
+      change: q.change_percent == null ? '—' : `${q.change_percent >= 0 ? '+' : ''}${Number(q.change_percent).toFixed(2)}%`,
+      sentiment,
+      key_signals: [`Điểm kỹ thuật ${score}/100`, `MA: ${dp.trend_status?.ma_alignment || 'unknown'}`, `RSI: ${dp.indicators?.rsi_14 == null ? '—' : Number(dp.indicators.rsi_14).toFixed(1)}`],
+      news_headlines: ['Không có news feed trong phương án không cần API key.'],
+      recommendation
+    });
   }
-
-  const clean = out.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/m, '').trim();
-  const m = clean.match(/\{[\s\S]*\}\s*$/);
-  if (!m) throw new Error('Mozy did not return JSON for watchlist review');
-  return JSON.parse(m[0]);
+  const positive = items.filter(x => x.sentiment === 'tích cực').length;
+  const negative = items.filter(x => x.sentiment === 'tiêu cực').length;
+  return {
+    headline: `Watchlist: ${positive} mã tín hiệu tích cực, ${negative} mã cần thận trọng.`,
+    watchlist: items,
+    overall_sentiment: positive > negative ? 'Tín hiệu kỹ thuật của watchlist nghiêng tích cực.' : negative > positive ? 'Watchlist đang thiên về phòng thủ.' : 'Tín hiệu watchlist đang phân hóa.',
+    risk_alerts: ['Dữ liệu Yahoo Finance có thể trễ hoặc thiếu.', 'Cần đối chiếu thông tin doanh nghiệp và định giá trước khi giao dịch.'],
+    outlook: 'Theo dõi tín hiệu kỹ thuật theo ngày; không dùng dashboard thay cho khuyến nghị đầu tư cá nhân hóa.'
+  };
 }
