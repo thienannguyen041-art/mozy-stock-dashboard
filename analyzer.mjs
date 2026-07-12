@@ -1,167 +1,101 @@
-// Decision Dashboard analyzer - asks Mozy AI for a structured JSON dashboard
-// per ticker, mirroring the DSA dashboard schema, localized to Vietnam.
-import { askMozy } from './mozy-ask.mjs';
+// Deterministic decision dashboard built from price and technical data.
+// This replaces the former Mozy AI call so the project has no API-key dependency.
 
-function toFixed(n, d = 2) {
-  if (n == null || Number.isNaN(Number(n))) return 'N/A';
-  return Number(n).toFixed(d);
+function n(value, fallback = null) {
+  return Number.isFinite(Number(value)) ? Number(value) : fallback;
 }
 
-function fmtPrice(n) {
-  if (n == null) return 'N/A';
-  return Number(n).toLocaleString('vi-VN');
+function money(value) {
+  const v = n(value);
+  return v == null ? '—' : Math.round(v).toLocaleString('vi-VN');
 }
 
-function fmtVolume(n) {
-  if (n == null) return 'N/A';
-  return Number(n).toLocaleString('vi-VN');
+function pct(value) {
+  const v = n(value);
+  return v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
 }
 
-function fmtValue(n) {
-  if (n == null) return 'N/A';
-  return `${(Number(n) / 1e9).toFixed(2)} tỷ`;
-}
+export async function generateDecisionDashboard({ ticker, today = {}, dataPerspective = {}, ohlcvTail = [] }) {
+  const trend = dataPerspective.trend_status || {};
+  const position = dataPerspective.price_position || {};
+  const indicators = dataPerspective.indicators || {};
+  const price = n(today.close, n(position.current_price));
+  const score = n(trend.trend_score, 50);
+  const rsi = n(indicators.rsi_14);
+  const support = n(position.support_level, price == null ? null : price * 0.95);
+  const resistance = n(position.resistance_level, price == null ? null : price * 1.08);
+  const overbought = rsi != null && rsi >= 70;
+  const oversold = rsi != null && rsi <= 30;
 
-function newsLine(items, max = 8) {
-  if (!Array.isArray(items) || !items.length) return '(không có news)';
-  return items.slice(0, max).map((n, i) => {
-    const title = n.title || n.headline || n.name || '(no title)';
-    const source = n.source || '';
-    const date = (n.published_at || n.date || '').toString().slice(0, 16);
-    return `${i + 1}. ${title}${source ? ` — ${source}` : ''}${date ? ` (${date})` : ''}`;
-  }).join('\n');
-}
+  let operation = 'giữ';
+  let decisionType = 'hold';
+  let signal = '🟡 quan sát';
+  let prediction = 'đi ngang';
+  if (score >= 65 && !overbought) { operation = 'mua'; decisionType = 'buy'; signal = '🟢 mua'; prediction = 'tăng'; }
+  else if (score >= 55) { operation = 'tích lũy'; decisionType = 'buy'; signal = '🟢 mua'; prediction = 'tăng'; }
+  else if (score < 35 && !oversold) { operation = 'bán'; decisionType = 'sell'; signal = '🔴 bán'; prediction = 'giảm'; }
+  else if (score < 45) { operation = 'giảm tỷ trọng'; decisionType = 'sell'; signal = '⚠️ rủi ro'; prediction = 'giảm'; }
+  else if (overbought) { operation = 'quan sát'; signal = '🟡 quan sát'; prediction = 'đi ngang'; }
 
-function statsBlock(stats) {
-  if (!stats) return '(không có)';
-  const keys = ['pe', 'pb', 'roe', 'roa', 'eps', 'gross_margin_q1', 'market_cap', 'beta', 'dividend_yield'];
-  const lines = [];
-  for (const k of keys) {
-    if (stats[k] != null) lines.push(`${k}: ${stats[k]}`);
-  }
-  if (!lines.length) {
-    for (const [k, v] of Object.entries(stats)) {
-      if (typeof v === 'object') continue;
-      lines.push(`${k}: ${v}`);
-    }
-  }
-  return lines.slice(0, 18).join('\n');
-}
+  const maNote = trend.ma_alignment === 'bullish' ? 'MA5 > MA10 > MA20, xu hướng ngắn hạn tích cực'
+    : trend.ma_alignment === 'bearish' ? 'MA5 < MA10 < MA20, xu hướng ngắn hạn suy yếu'
+      : 'Các đường MA chưa đồng thuận';
+  const macdPositive = n(indicators.macd_histogram, 0) > 0;
+  const stopLoss = price == null ? null : Math.min(support ?? price * 0.95, price * 0.95);
+  const takeProfit = price == null ? null : Math.max(resistance ?? price * 1.08, price * 1.06);
 
-export function buildPrompt({ ticker, name, today, dataPerspective, ohlcvTail, stats, news, riskRows }) {
-  const dp = dataPerspective || {};
-  const trend = dp.trend_status || {};
-  const pp = dp.price_position || {};
-  const ind = dp.indicators || {};
-
-  const ohlcvLines = (ohlcvTail || []).map(r =>
-    `${(r.timestamp || '').toString().slice(0, 10)} | O ${fmtPrice(r.open)} | H ${fmtPrice(r.high)} | L ${fmtPrice(r.low)} | C ${fmtPrice(r.close)} | V ${fmtVolume(r.volume)}`
-  ).join('\n');
-
-  return `Bạn là analyst chứng khoán tại Việt Nam. Hãy viết một Decision Dashboard ngắn gọn, có cấu trúc, cho cổ phiếu ${ticker} (${name || ticker}) trên thị trường Việt Nam, dựa trên dữ liệu sau.
-
-# Bối cảnh
-
-## Phiên gần nhất
-- Mã: ${ticker}
-- Giá đóng cửa: ${fmtPrice(today?.close ?? pp.current_price)} đồng
-- Tổng KL: ${fmtVolume(today?.total_volume)} cp
-- Tổng giá trị: ${fmtValue(today?.total_value)}
-- Mua nước ngoài: ${fmtVolume(today?.buy_foreign_quantity)}
-- Bán nước ngoài: ${fmtVolume(today?.sell_foreign_quantity)}
-
-## Phân tích kỹ thuật (đã tính sẵn)
-- MA5: ${fmtPrice(pp.ma5)} | MA10: ${fmtPrice(pp.ma10)} | MA20: ${fmtPrice(pp.ma20)}
-- Trạng thái MA: ${trend.ma_alignment || 'N/A'} (${trend.is_bullish === true ? 'multi đầu' : trend.is_bullish === false ? 'đa đầu giảm' : 'không rõ'})
-- Trend score: ${trend.trend_score ?? 'N/A'}/100
-- Bias MA5: ${toFixed(pp.bias_ma5)}% (${pp.bias_status})
-- Hỗ trợ: ${fmtPrice(pp.support_level)} | Kháng cự: ${fmtPrice(pp.resistance_level)}
-- RSI(14): ${toFixed(ind.rsi_14)}
-- MACD: ${toFixed(ind.macd)} | Signal: ${toFixed(ind.macd_signal)} | Histogram: ${toFixed(ind.macd_histogram)}
-
-## Định giá / chỉ số
-${statsBlock(stats)}
-
-## OHLCV 10 phiên gần nhất
-${ohlcvLines || '(không có)'}
-
-## News gần nhất
-${newsLine(news)}
-
-# Yêu cầu output
-
-Hãy trả về DUY NHẤT một JSON object (không có markdown fence, không text ngoài JSON), theo schema sau:
-
-{
-  "stock_name": "tên doanh nghiệp",
-  "sentiment_score": 0-100,
-  "trend_prediction": "tăng mạnh | tăng | đi ngang | giảm | giảm mạnh",
-  "operation_advice": "mua | tích lũy | giữ | giảm tỷ trọng | bán | quan sát",
-  "decision_type": "buy | hold | sell",
-  "confidence_level": "cao | trung bình | thấp",
-  "dashboard": {
-    "core_conclusion": {
-      "one_sentence": "1 câu dưới 30 chữ chốt nên làm gì",
-      "signal_type": "🟢 mua | 🟡 quan sát | 🔴 bán | ⚠️ rủi ro",
-      "time_sensitivity": "ngay hôm nay | trong tuần | không gấp",
-      "position_advice": {
-        "no_position": "đang trống vị thế nên làm gì",
-        "has_position": "đang nắm giữ nên làm gì"
+  return {
+    stock_name: ticker,
+    sentiment_score: Math.round(score),
+    trend_prediction: prediction,
+    operation_advice: operation,
+    decision_type: decisionType,
+    confidence_level: ohlcvTail.length >= 30 ? 'trung bình' : 'thấp',
+    dashboard: {
+      core_conclusion: {
+        one_sentence: `${ticker}: ${operation.toUpperCase()} theo tín hiệu kỹ thuật, quản trị rủi ro tại vùng ${money(stopLoss)}.`,
+        signal_type: signal,
+        time_sensitivity: operation === 'mua' || operation === 'bán' ? 'trong tuần' : 'không gấp',
+        position_advice: {
+          no_position: operation === 'mua' || operation === 'tích lũy' ? 'Giải ngân từng phần, không mua đuổi.' : 'Chờ tín hiệu rõ hơn trước khi mở vị thế.',
+          has_position: operation === 'bán' || operation === 'giảm tỷ trọng' ? 'Ưu tiên hạ tỷ trọng nếu vi phạm ngưỡng rủi ro.' : 'Tiếp tục nắm giữ và tuân thủ điểm dừng lỗ.'
+        }
+      },
+      data_perspective: {
+        trend_summary: `${maNote}; RSI ${rsi == null ? '—' : rsi.toFixed(1)}; MACD histogram ${macdPositive ? 'dương' : 'âm'}.`,
+        volume_meaning: 'Dữ liệu thanh khoản dùng để theo dõi xác nhận xu hướng; cần so sánh thêm với bình quân 20 phiên.',
+        chip_health: score >= 60 ? 'khoẻ' : score < 40 ? 'cảnh báo' : 'bình thường',
+        valuation_view: 'không đủ dữ liệu định giá từ nguồn miễn phí'
+      },
+      intelligence: {
+        latest_news: 'Nguồn miễn phí này không tích hợp tin tức; cần đối chiếu công bố thông tin của doanh nghiệp.',
+        risk_alerts: [overbought ? 'RSI ở vùng quá mua, rủi ro điều chỉnh tăng.' : 'Theo dõi điểm dừng lỗ và thanh khoản.', 'Tín hiệu kỹ thuật không thay thế phân tích cơ bản.'],
+        positive_catalysts: [trend.ma_alignment === 'bullish' ? 'Cấu trúc MA đang ủng hộ xu hướng tăng.' : 'Chờ MA và MACD xác nhận xu hướng.', macdPositive ? 'MACD histogram dương.' : 'Cần chờ MACD cải thiện.'],
+        earnings_outlook: 'Không có dữ liệu KQKD tích hợp trong nguồn miễn phí.',
+        sentiment_summary: `Điểm kỹ thuật ${Math.round(score)}/100; biến động phiên gần nhất ${pct(today.change_percent)}.`
+      },
+      battle_plan: {
+        sniper_points: {
+          ideal_buy: money(support), secondary_buy: price == null ? '—' : money(price * 0.97),
+          stop_loss: money(stopLoss), take_profit: money(takeProfit)
+        },
+        position_strategy: {
+          suggested_position: operation === 'mua' ? 'tối đa 20–30% vốn' : 'duy trì tỷ trọng thận trọng',
+          entry_plan: 'Chia lệnh, ưu tiên mua gần hỗ trợ; không mua đuổi khi giá tăng nóng.',
+          risk_control: 'Cắt lỗ khi giá đóng cửa dưới ngưỡng dừng lỗ; không dùng tín hiệu này như khuyến nghị đầu tư cá nhân hóa.'
+        },
+        action_checklist: [
+          `${trend.ma_alignment === 'bullish' ? '✅' : '⚠️'} ${maNote}`,
+          `${macdPositive ? '✅' : '⚠️'} MACD histogram ${macdPositive ? 'dương' : 'âm'}`,
+          `${overbought ? '⚠️' : '✅'} RSI ${rsi == null ? 'chưa đủ dữ liệu' : rsi.toFixed(1)}`,
+          `⚠️ Điểm dừng lỗ: ${money(stopLoss)}`,
+          '⚠️ Đối chiếu báo cáo tài chính và tin tức trước khi ra quyết định.'
+        ]
       }
     },
-    "data_perspective": {
-      "trend_summary": "đánh giá xu hướng dựa trên MA + RSI + MACD",
-      "volume_meaning": "ý nghĩa của thanh khoản phiên gần đây",
-      "chip_health": "khoẻ | bình thường | cảnh báo",
-      "valuation_view": "đắt | hợp lý | rẻ"
-    },
-    "intelligence": {
-      "latest_news": "1 câu tin nóng nhất",
-      "risk_alerts": ["risk 1", "risk 2"],
-      "positive_catalysts": ["catalyst 1", "catalyst 2"],
-      "earnings_outlook": "triển vọng KQKD",
-      "sentiment_summary": "1 câu cảm nhận thị trường"
-    },
-    "battle_plan": {
-      "sniper_points": {
-        "ideal_buy": "vùng giá mua lý tưởng (đồng)",
-        "secondary_buy": "vùng giá mua thứ cấp",
-        "stop_loss": "ngưỡng cắt lỗ",
-        "take_profit": "vùng giá chốt lời"
-      },
-      "position_strategy": {
-        "suggested_position": "% tài khoản đề xuất",
-        "entry_plan": "kế hoạch vào lệnh ngắn",
-        "risk_control": "cách kiểm soát rủi ro"
-      },
-      "action_checklist": [
-        "✅/⚠️/❌ điểm 1",
-        "✅/⚠️/❌ điểm 2",
-        "✅/⚠️/❌ điểm 3",
-        "✅/⚠️/❌ điểm 4",
-        "✅/⚠️/❌ điểm 5"
-      ]
-    }
-  },
-  "analysis_summary": "tóm tắt phân tích 80-120 chữ",
-  "risk_warning": "rủi ro đáng chú ý nhất",
-  "buy_reason": "lý do hành động chính",
-  "news_summary": "1-2 câu tóm news"
-}
-
-Yêu cầu nghiêm ngặt:
-- DUY NHẤT JSON, tiếng Việt, không markdown fence.
-- Số thì là số (price, score), tỷ lệ % thì kèm "%" trong chuỗi nếu cần.
-- Không bịa, nếu thiếu data thì ghi "không đủ dữ liệu".
-- Không thêm trường khác ngoài schema.`;
-}
-
-export async function generateDecisionDashboard(ctx) {
-  const prompt = buildPrompt(ctx);
-  const out = await askMozy(prompt, { mode: 'simple_chat', timeoutSec: 240 });
-  // Strip code fences if model leaks
-  const clean = out.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/m, '').trim();
-  const m = clean.match(/\{[\s\S]*\}\s*$/);
-  if (!m) throw new Error('Mozy did not return JSON: ' + clean.slice(0, 200));
-  return JSON.parse(m[0]);
+    analysis_summary: `${ticker} có điểm tín hiệu kỹ thuật ${Math.round(score)}/100. ${maNote}. Dashboard sử dụng quy tắc MA, RSI và MACD từ dữ liệu Yahoo Finance; đây là công cụ theo dõi, không phải khuyến nghị đầu tư.`,
+    risk_warning: 'Dữ liệu miễn phí có thể trễ hoặc thiếu; biến động thị trường có thể khiến tín hiệu mất hiệu lực.',
+    buy_reason: operation === 'mua' || operation === 'tích lũy' ? 'Xu hướng và điểm kỹ thuật đang tương đối tích cực.' : 'Chưa có đủ xác nhận kỹ thuật để tăng tỷ trọng.',
+    news_summary: 'Không có news feed tích hợp trong phương án không cần API key.'
+  };
 }
